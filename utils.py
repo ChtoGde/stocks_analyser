@@ -84,8 +84,8 @@ async def get_candles(TOKEN: str, stocks: dict, tickers: list, start_date: datet
                     all_candles_dfs.append(ticker_df)
                     # print(f"Успешно добавлен {ticker} в результат")
 
-                except Exception as e:
-                    # print(f"Ошибка при получении свечей для {ticker}: {e}")
+                except Exception:
+                    # print(f"Ошибка при получении свечей для {ticker}: {Exception}")
                     continue
 
         if not all_candles_dfs:
