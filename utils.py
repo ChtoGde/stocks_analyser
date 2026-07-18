@@ -36,7 +36,7 @@ async def get_stocks(TOKEN: str) -> dict:
         return tickers
 
 
-async def get_candles(TOKEN: str, tickers: dict, start_date: datetime, end_date=datetime) -> pd.DataFrame:
+async def get_candles(TOKEN: str, stocks: dict, tickers: list, start_date: datetime, end_date=datetime) -> pd.DataFrame:
     """Функция для получения данных свечей: open, high, low, close, volume и т.д."""
     async with AsyncClient(TOKEN) as client:
         # Создание пустого списка датафреймов с данными о свечах
@@ -45,47 +45,48 @@ async def get_candles(TOKEN: str, tickers: dict, start_date: datetime, end_date=
         start_date = start_date
 
         print(f"Запрашиваем данные с {start_date.date()} по {end_date.date()}")
-        print(f"Всего тикеров: {len(tickers)}")
+        print(f"Всего тикеров: {len(stocks)}")
 
-        for ticker, values in tickers.items():
-            # проходим по каждому тикеру и получаем его историю свечей
-            try:
-                candles_resp = await client.market_data.get_candles(
-                    figi=values['figi'],
-                    from_=start_date,
-                    to=end_date,
-                    interval=CandleInterval.CANDLE_INTERVAL_DAY
-                )
-                candles = candles_resp.candles
+        for ticker, values in stocks.items():
+            if ticker in tickers:
+                # проходим по каждому тикеру и получаем его историю свечей
+                try:
+                    candles_resp = await client.market_data.get_candles(
+                        figi=values['figi'],
+                        from_=start_date,
+                        to=end_date,
+                        interval=CandleInterval.CANDLE_INTERVAL_DAY
+                    )
+                    candles = candles_resp.candles
 
-                # Обработка свечей и запись в список
-                rows = []
-                for candle in candles:
-                    row = {
-                        'ticker': ticker,
-                        'date': candle.time.date(),
-                        'open': quotation_to_float(candle.open),
-                        'high': quotation_to_float(candle.high),
-                        'low': quotation_to_float(candle.low),
-                        'close': quotation_to_float(candle.close),
-                        'volume': candle.volume,
-                    }
-                    rows.append(row)
+                    # Обработка свечей и запись в список
+                    rows = []
+                    for candle in candles:
+                        row = {
+                            'ticker': ticker,
+                            'sector': values['sector'],
+                            'date': candle.time.date(),
+                            'open': quotation_to_float(candle.open),
+                            'high': quotation_to_float(candle.high),
+                            'low': quotation_to_float(candle.low),
+                            'close': quotation_to_float(candle.close),
+                            'volume': candle.volume,
+                        }
+                        rows.append(row)
 
-                # преобразуем полученный список в DataFrame
-                ticker_df = pd.DataFrame(rows)
-                if ticker_df.empty:
-                    print(
-                        f"DataFrame для {ticker} пустой после преобразования")
+                    # преобразуем полученный список в DataFrame
+                    ticker_df = pd.DataFrame(rows)
+                    if ticker_df.empty:
+                        # print(f"DataFrame для {ticker} пустой после преобразования")
+                        continue
+
+                    # добавляем датафраму к общему списку
+                    all_candles_dfs.append(ticker_df)
+                    # print(f"Успешно добавлен {ticker} в результат")
+
+                except Exception as e:
+                    # print(f"Ошибка при получении свечей для {ticker}: {e}")
                     continue
-
-                # добавляем датафраму к общему списку
-                all_candles_dfs.append(ticker_df)
-                print(f"Успешно добавлен {ticker} в результат")
-
-            except Exception as e:
-                print(f"Ошибка при получении свечей для {ticker}: {e}")
-                continue
 
         if not all_candles_dfs:
             print("Все тикеры были пропущены — возвращаем пустой DataFrame")
@@ -119,8 +120,21 @@ def stoch(df: pd.DataFrame):
     return slowk, slowd
 
 
+def get_seasons(df: pd.DataFrame):
+    months = df['date'].dt.month
+
+    season_map = {
+        12: 'winter', 1: 'winter', 2: 'winter',
+        3: 'spring', 4: 'spring', 5: 'spring',
+        6: 'summer', 7: 'summer', 8: 'summer',
+        9: 'autumn', 10: 'autumn', 11: 'autumn'
+    }
+    return months.map(season_map)
+
+
 def calculate_indicators(df: pd.DataFrame):
     """Создаёт технические индикаторы в датафрейме"""
+    df['season'] = get_seasons(df)
     df['atr'] = ATR(df['high'].values, df['low'].values,
                     df['close'].values, timeperiod=21)
     df['obv'] = OBV(df['close'].to_numpy(dtype=np.float64),
@@ -169,6 +183,7 @@ def calculate_indicators(df: pd.DataFrame):
 
 def calculate_indicators_for_prediction_modul(df: pd.DataFrame):
     """Создаёт технические индикаторы в датафрейме"""
+    df['season'] = get_seasons(df)
     df['atr'] = ATR(df['high'].values, df['low'].values,
                     df['close'].values, timeperiod=21)
     df['obv'] = OBV(df['close'].to_numpy(dtype=np.float64),
