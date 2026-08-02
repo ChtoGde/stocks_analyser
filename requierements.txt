@@ -5,3 +5,4 @@ pandas==3.0.3
 scikit-learn==1.9.0
 t-tech-investments==1.49.2
 TA-Lib==0.6.8
+catboost==1.2.10
