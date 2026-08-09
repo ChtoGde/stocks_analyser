@@ -113,18 +113,6 @@ def stoch(df: pd.DataFrame):
     return slowk, slowd
 
 
-def get_seasons(df: pd.DataFrame):
-    months = df['date'].dt.month
-
-    season_map = {
-        12: 'winter', 1: 'winter', 2: 'winter',
-        3: 'spring', 4: 'spring', 5: 'spring',
-        6: 'summer', 7: 'summer', 8: 'summer',
-        9: 'autumn', 10: 'autumn', 11: 'autumn'
-    }
-    return months.map(season_map)
-
-
 def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """
     Создаёт технические индикаторы в датафрейме, строго по тикерам.
@@ -137,11 +125,8 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
         # заменяем 0 на близкое значение, чтобы избежать деления на 0
         g.close = g.close.replace(0, 1e-9)
 
-        # Сезонность
-        g['season'] = get_seasons(g)
-
-        # Волатильность
-        g['volatility'] = g.close.pct_change().std()
+        # Доходность
+        g['return'] = g['close'].pct_change()
 
         # ATR
         g['atr'] = ATR(
@@ -165,22 +150,18 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
         # Volume ratio
         vol_mean = g['volume'].rolling(21, min_periods=1).mean()
         g['volume_ratio'] = np.where(
-            vol_mean != 0, g['volume'] / vol_mean, np.nan
-        )
+            vol_mean != 0, g['volume'] / vol_mean, np.nan)
 
-        # RSI и его наклон
+        # RSI
         g['rsi'] = RSI(g['close'], 14)
-        g['rsi_slope'] = g['rsi'].diff()
 
         # EMA
         g['ema_12'] = EMA(g['close'].values, timeperiod=12)
         g['ema_26'] = EMA(g['close'].values, timeperiod=26)
-        g['ema_slope'] = g['ema_12'].diff()
 
         # SMA и отношения
         g['sma_10'] = SMA(g['close'], 10)
         g['sma_40'] = SMA(g['close'], 40)
-        g['price_vs_sma_10'] = g['close'] / g['sma_10']
         g['sma10_vs_sma40'] = g['sma_10'] / g['sma_40']
 
         # CCI
@@ -196,7 +177,6 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
         g['macd'] = macd
         g['signal'] = signal
         g['hist'] = hist
-        g['hist_slope'] = g['hist'].diff()
 
         # Williams R
         g['williams_r'] = WILLR(
@@ -206,8 +186,10 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
             timeperiod=14
         )
 
-        # --- GARCH-подобные признаки (EWMA-волатильность и асимметрия) ---
-        span = 32  # аналог alpha ~ 0.94 (стандарт RiskMetrics)
+        # GARCH-подобные признаки (EWMA-волатильность и асимметрия)
+        # P.S Все эти аналоги гарч признаков написала мне нейросеть, сказать про них ничего не могу,
+        # но вроде пользу приносят, оригинальные гарч требуют больших мощностей, было лень возиться:)
+        span = 32
         log_ret = np.log(g['close'] / g['close'].shift(1))
 
         # 1. EWMA-std (аналог GARCH)
@@ -226,30 +208,12 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
             span=span, min_periods=20).var().clip(lower=1e-8)
         g['log_vol'] = np.log(ewma_var)
 
-        # --- Классические волатильности и отношения ---
+        # Volatilty
         g['volatility_20'] = log_ret.rolling(20, min_periods=1).std()
         g['volatility_60'] = log_ret.rolling(60, min_periods=1).std()
-        g['vol_ratio_20_60'] = np.where(
-            g['volatility_60'] != 0,
-            g['volatility_20'] / g['volatility_60'],
-            np.nan
-        )
 
         # Momentum
         g['momentum'] = g['close'] / g['close'].shift(5)
-
-        # Range-нормы
-        denom = (g['high'] - g['low'] + 1e-8)
-        g['range_norm'] = (g['close'] - g['low']) / denom
-        g['range_ratio'] = g['high'] / g['low']
-
-        # Open/Close ratio
-        g['open_close_ratio'] = g['open'] / g['close']
-
-        # Volume spike
-        g['volume_spike'] = (
-            g['volume'] > g['volume'].rolling(21, min_periods=1).mean() * 1.5
-        ).astype(int)
 
         # AD Line
         g['ad_line'] = AD(
@@ -259,15 +223,13 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
             g['volume'].to_numpy(dtype=np.float64)
         )
 
-        # Return
-        g['return'] = log_ret  # лог-доходность (лучше для ML)
+        # Горизонт прогноза, пробовал разные, этот дал лучший результат
+        horizon = 7
 
-        # Return 7d и таргет (строго без утечки: shift(-6) делается внутри группы)
-        # horizon = 6 торговых дней вперёд
-        horizon = 6
-        future_ret = g['return'].shift(-horizon)
-        g['return_7d'] = future_ret
-        g['target'] = (future_ret > 0).astype(float)
+        # Определяем долю изменения цены между текущей и будущей
+        g['return_7d'] = (g.close.shift(-horizon) - g.close) / g.close
+        # Если изменение положительно, то 1. Иначе 0.
+        g['target'] = (g['return_7d'] > 0).astype(float)
 
         return g
 
@@ -280,21 +242,17 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
 def calculate_indicators_for_prediction_modul(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Создаёт технические индикаторы в датафрейме, строго по тикерам.
+    Создаёт технические индикаторы в датафрейме, строго по тикерам (без таргета).
     Возвращает новый DataFrame (без изменения оригинала).
     """
-    # Копируем, чтобы не менять исходный DF
+    # подробные описания в функции выше
     df = df.sort_values(['ticker', 'date']).copy()
 
     def _calc_group(g: pd.DataFrame) -> pd.DataFrame:
         g.close = g.close.replace(0, 1e-9)
 
-        # Сезонность
-        g.close = g.close.replace(0, 1e-9)
-        g['season'] = get_seasons(g)
-        g['volatility'] = g.close.pct_change().std()
+        g['return'] = g['close'].pct_change()
 
-        # ATR
         g['atr'] = ATR(
             g['high'].values,
             g['low'].values,
@@ -302,39 +260,28 @@ def calculate_indicators_for_prediction_modul(df: pd.DataFrame) -> pd.DataFrame:
             timeperiod=14
         )
 
-        # OBV
         g['obv'] = OBV(
             g['close'].to_numpy(dtype=np.float64),
             g['volume'].to_numpy(dtype=np.float64)
         )
 
-        # Stochastic
         stoch_k, stoch_d = stoch(g)
         g['stoch_k'] = stoch_k
         g['stoch_d'] = stoch_d
 
-        # Volume ratio
         vol_mean = g['volume'].rolling(21, min_periods=1).mean()
         g['volume_ratio'] = np.where(
-            vol_mean != 0, g['volume'] / vol_mean, np.nan
-        )
+            vol_mean != 0, g['volume'] / vol_mean, np.nan)
 
-        # RSI и его наклон
         g['rsi'] = RSI(g['close'], 14)
-        g['rsi_slope'] = g['rsi'].diff()
 
-        # EMA
         g['ema_12'] = EMA(g['close'].values, timeperiod=12)
         g['ema_26'] = EMA(g['close'].values, timeperiod=26)
-        g['ema_slope'] = g['ema_12'].diff()
 
-        # SMA и отношения
         g['sma_10'] = SMA(g['close'], 10)
         g['sma_40'] = SMA(g['close'], 40)
-        g['price_vs_sma_10'] = g['close'] / g['sma_10']
         g['sma10_vs_sma40'] = g['sma_10'] / g['sma_40']
 
-        # CCI
         g['cci_20'] = CCI(
             g['high'].values,
             g['low'].values,
@@ -342,14 +289,11 @@ def calculate_indicators_for_prediction_modul(df: pd.DataFrame) -> pd.DataFrame:
             timeperiod=14
         )
 
-        # MACD
         macd, signal, hist = calc_macd(g['close'], 12, 26, 9)
         g['macd'] = macd
         g['signal'] = signal
         g['hist'] = hist
-        g['hist_slope'] = g['hist'].diff()
 
-        # Williams R
         g['williams_r'] = WILLR(
             g['high'].values,
             g['low'].values,
@@ -357,52 +301,24 @@ def calculate_indicators_for_prediction_modul(df: pd.DataFrame) -> pd.DataFrame:
             timeperiod=14
         )
 
-        # --- GARCH-подобные признаки (EWMA-волатильность и асимметрия) ---
         span = 32  # аналог alpha ~ 0.94 (стандарт RiskMetrics)
         log_ret = np.log(g['close'] / g['close'].shift(1))
-
-        # 1. EWMA-std (аналог GARCH)
         ewma_std = log_ret.ewm(span=span, min_periods=20).std()
         g['vol_ewma'] = ewma_std
-
-        # 2. Асимметричная волатильность (аналог GJR-GARCH)
         neg_shock = log_ret.clip(upper=0)
         pos_shock = log_ret.clip(lower=0)
         weighted_sq = pos_shock**2 + 1.5 * neg_shock**2  # больший вес на падения
         g['vol_asym'] = weighted_sq.ewm(
             span=span, min_periods=20).mean() ** 0.5
-
-        # 3. Лог-дисперсия (намёк на EGARCH)
         ewma_var = log_ret.ewm(
             span=span, min_periods=20).var().clip(lower=1e-8)
         g['log_vol'] = np.log(ewma_var)
 
-        # --- Классические волатильности и отношения ---
         g['volatility_20'] = log_ret.rolling(20, min_periods=1).std()
         g['volatility_60'] = log_ret.rolling(60, min_periods=1).std()
-        g['vol_ratio_20_60'] = np.where(
-            g['volatility_60'] != 0,
-            g['volatility_20'] / g['volatility_60'],
-            np.nan
-        )
 
-        # Momentum
         g['momentum'] = g['close'] / g['close'].shift(5)
 
-        # Range-нормы
-        denom = (g['high'] - g['low'] + 1e-8)
-        g['range_norm'] = (g['close'] - g['low']) / denom
-        g['range_ratio'] = g['high'] / g['low']
-
-        # Open/Close ratio
-        g['open_close_ratio'] = g['open'] / g['close']
-
-        # Volume spike
-        g['volume_spike'] = (
-            g['volume'] > g['volume'].rolling(21, min_periods=1).mean() * 1.5
-        ).astype(int)
-
-        # AD Line
         g['ad_line'] = AD(
             g['high'].to_numpy(dtype=np.float64),
             g['low'].to_numpy(dtype=np.float64),
@@ -410,12 +326,8 @@ def calculate_indicators_for_prediction_modul(df: pd.DataFrame) -> pd.DataFrame:
             g['volume'].to_numpy(dtype=np.float64)
         )
 
-        # Return
-        g['return'] = log_ret  # лог-доходность (лучше для ML)
-
         return g
 
-    # Применяем расчёт строго по тикерам
     df = df.groupby('ticker').apply(_calc_group)
     df.reset_index(level='ticker', inplace=True)
 
