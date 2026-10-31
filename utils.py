@@ -35,7 +35,7 @@ async def get_stocks(TOKEN: str) -> dict:
         return tickers
 
 
-async def get_candles(TOKEN: str, stocks: dict, tickers: list, start_date: datetime, end_date=datetime) -> pd.DataFrame:
+async def get_candles(TOKEN: str, stocks: dict, start_date: datetime, end_date=datetime) -> pd.DataFrame:
     """Функция для получения данных свечей: open, high, low, close, volume и т.д."""
     async with AsyncClient(TOKEN) as client:
         # Создание пустого списка датафреймов с данными о свечах
@@ -45,41 +45,40 @@ async def get_candles(TOKEN: str, stocks: dict, tickers: list, start_date: datet
         print(f"Всего тикеров: {len(stocks)}")
 
         for ticker, values in stocks.items():
-            if ticker in tickers:
-                # проходим по каждому тикеру и получаем его историю свечей
+            # проходим по каждому тикеру и получаем его историю свечей
 
-                candles_resp = await client.market_data.get_candles(
-                    figi=values['figi'],
-                    from_=start_date,
-                    to=end_date,
-                    interval=CandleInterval.CANDLE_INTERVAL_DAY
-                )
-                candles = candles_resp.candles
+            candles_resp = await client.market_data.get_candles(
+                figi=values['figi'],
+                from_=start_date,
+                to=end_date,
+                interval=CandleInterval.CANDLE_INTERVAL_DAY
+            )
+            candles = candles_resp.candles
 
-                # Обработка свечей и запись в список
-                rows = []
-                for candle in candles:
-                    row = {
-                        'ticker': ticker,
-                        'sector': values['sector'],
-                        'date': candle.time.date(),
-                        'open': quotation_to_float(candle.open),
-                        'high': quotation_to_float(candle.high),
-                        'low': quotation_to_float(candle.low),
-                        'close': quotation_to_float(candle.close),
-                        'volume': candle.volume,
-                    }
-                    rows.append(row)
+            # Обработка свечей и запись в список
+            rows = []
+            for candle in candles:
+                row = {
+                    'ticker': ticker,
+                    'sector': values['sector'],
+                    'date': candle.time.date(),
+                    'open': quotation_to_float(candle.open),
+                    'high': quotation_to_float(candle.high),
+                    'low': quotation_to_float(candle.low),
+                    'close': quotation_to_float(candle.close),
+                    'volume': candle.volume,
+                }
+                rows.append(row)
 
-                # преобразуем полученный список в DataFrame
-                ticker_df = pd.DataFrame(rows)
-                if ticker_df.empty:
-                    # print(f"DataFrame для {ticker} пустой после преобразования")
-                    continue
+            # преобразуем полученный список в DataFrame
+            ticker_df = pd.DataFrame(rows)
+            if ticker_df.empty:
+                # print(f"DataFrame для {ticker} пустой после преобразования")
+                continue
 
-                # добавляем датафраму к общему списку
-                all_candles_dfs.append(ticker_df)
-                # print(f"Успешно добавлен {ticker} в результат")
+            # добавляем датафраму к общему списку
+            all_candles_dfs.append(ticker_df)
+            # print(f"Успешно добавлен {ticker} в результат")
 
         if not all_candles_dfs:
             print("Все тикеры были пропущены — возвращаем пустой DataFrame")
@@ -125,8 +124,10 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
         # заменяем 0 на близкое значение, чтобы избежать деления на 0
         g.close = g.close.replace(0, 1e-9)
 
+        g['month'] = g['date'].dt.month
         # Доходность
         g['return'] = g['close'].pct_change()
+        g['range'] = (g['high'] - g['low']) / g['close'].shift(1)
 
         # ATR
         g['atr'] = ATR(
@@ -147,11 +148,6 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
         g['stoch_k'] = stoch_k
         g['stoch_d'] = stoch_d
 
-        # Volume ratio
-        vol_mean = g['volume'].rolling(21, min_periods=1).mean()
-        g['volume_ratio'] = np.where(
-            vol_mean != 0, g['volume'] / vol_mean, np.nan)
-
         # RSI
         g['rsi'] = RSI(g['close'], 14)
 
@@ -162,15 +158,6 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
         # SMA и отношения
         g['sma_10'] = SMA(g['close'], 10)
         g['sma_40'] = SMA(g['close'], 40)
-        g['sma10_vs_sma40'] = g['sma_10'] / g['sma_40']
-
-        # CCI
-        g['cci_20'] = CCI(
-            g['high'].values,
-            g['low'].values,
-            g['close'].values,
-            timeperiod=14
-        )
 
         # MACD
         macd, signal, hist = calc_macd(g['close'], 12, 26, 9)
@@ -186,27 +173,7 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
             timeperiod=14
         )
 
-        # GARCH-подобные признаки (EWMA-волатильность и асимметрия)
-        # P.S Все эти аналоги гарч признаков написала мне нейросеть, сказать про них ничего не могу,
-        # но вроде пользу приносят, оригинальные гарч требуют больших мощностей, было лень возиться:)
-        span = 32
         log_ret = np.log(g['close'] / g['close'].shift(1))
-
-        # 1. EWMA-std (аналог GARCH)
-        ewma_std = log_ret.ewm(span=span, min_periods=20).std()
-        g['vol_ewma'] = ewma_std
-
-        # 2. Асимметричная волатильность (аналог GJR-GARCH)
-        neg_shock = log_ret.clip(upper=0)
-        pos_shock = log_ret.clip(lower=0)
-        weighted_sq = pos_shock**2 + 1.5 * neg_shock**2  # больший вес на падения
-        g['vol_asym'] = weighted_sq.ewm(
-            span=span, min_periods=20).mean() ** 0.5
-
-        # 3. Лог-дисперсия (намёк на EGARCH)
-        ewma_var = log_ret.ewm(
-            span=span, min_periods=20).var().clip(lower=1e-8)
-        g['log_vol'] = np.log(ewma_var)
 
         # Volatilty
         g['volatility_20'] = log_ret.rolling(20, min_periods=1).std()
@@ -250,8 +217,10 @@ def calculate_indicators_for_prediction_modul(df: pd.DataFrame) -> pd.DataFrame:
 
     def _calc_group(g: pd.DataFrame) -> pd.DataFrame:
         g.close = g.close.replace(0, 1e-9)
+        g['month'] = g['date'].dt.month
 
         g['return'] = g['close'].pct_change()
+        g['range'] = (g['high'] - g['low']) / g['close'].shift(1)
 
         g['atr'] = ATR(
             g['high'].values,
@@ -269,10 +238,6 @@ def calculate_indicators_for_prediction_modul(df: pd.DataFrame) -> pd.DataFrame:
         g['stoch_k'] = stoch_k
         g['stoch_d'] = stoch_d
 
-        vol_mean = g['volume'].rolling(21, min_periods=1).mean()
-        g['volume_ratio'] = np.where(
-            vol_mean != 0, g['volume'] / vol_mean, np.nan)
-
         g['rsi'] = RSI(g['close'], 14)
 
         g['ema_12'] = EMA(g['close'].values, timeperiod=12)
@@ -280,14 +245,6 @@ def calculate_indicators_for_prediction_modul(df: pd.DataFrame) -> pd.DataFrame:
 
         g['sma_10'] = SMA(g['close'], 10)
         g['sma_40'] = SMA(g['close'], 40)
-        g['sma10_vs_sma40'] = g['sma_10'] / g['sma_40']
-
-        g['cci_20'] = CCI(
-            g['high'].values,
-            g['low'].values,
-            g['close'].values,
-            timeperiod=14
-        )
 
         macd, signal, hist = calc_macd(g['close'], 12, 26, 9)
         g['macd'] = macd
@@ -301,18 +258,7 @@ def calculate_indicators_for_prediction_modul(df: pd.DataFrame) -> pd.DataFrame:
             timeperiod=14
         )
 
-        span = 32  # аналог alpha ~ 0.94 (стандарт RiskMetrics)
         log_ret = np.log(g['close'] / g['close'].shift(1))
-        ewma_std = log_ret.ewm(span=span, min_periods=20).std()
-        g['vol_ewma'] = ewma_std
-        neg_shock = log_ret.clip(upper=0)
-        pos_shock = log_ret.clip(lower=0)
-        weighted_sq = pos_shock**2 + 1.5 * neg_shock**2  # больший вес на падения
-        g['vol_asym'] = weighted_sq.ewm(
-            span=span, min_periods=20).mean() ** 0.5
-        ewma_var = log_ret.ewm(
-            span=span, min_periods=20).var().clip(lower=1e-8)
-        g['log_vol'] = np.log(ewma_var)
 
         g['volatility_20'] = log_ret.rolling(20, min_periods=1).std()
         g['volatility_60'] = log_ret.rolling(60, min_periods=1).std()
